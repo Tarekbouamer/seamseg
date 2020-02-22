@@ -1,0 +1,1 @@
+python -m torch.distributed.launch --nproc_per_node=1 ./scripts/test_panoptic.py --meta ./default/metadata.bin --log_dir ./default/ ./default/config.ini ./default/seamseg_r50_vistas.tar ./input/ ./output/

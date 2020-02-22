@@ -4,6 +4,10 @@ from collections import OrderedDict
 from functools import partial
 from os import path, mkdir
 
+import cv2 as cv
+import matplotlib.pyplot as plt
+import glob
+
 import numpy as np
 import torch
 import torch.utils.data as data
@@ -37,7 +41,7 @@ parser = argparse.ArgumentParser(description="Panoptic testing script")
 parser.add_argument("--local_rank", type=int)
 parser.add_argument("--log_dir", type=str, default=".", help="Write logs to the given directory")
 parser.add_argument("--meta", type=str, help="Path to metadata file of training dataset")
-parser.add_argument("--score_threshold", type=float, default=0.5, help="Detection confidence threshold")
+parser.add_argument("--score_threshold", type=float, default=0.7, help="Detection confidence threshold")
 parser.add_argument("--iou_threshold", type=float, default=0.5, help="Panoptic disambiguation IoU threshold")
 parser.add_argument("--min_area", type=float, default=4096, help="Minimum pixel area for stuff predictions")
 parser.add_argument("--raw", action="store_true", help="Save raw predictions instead of rendered images")
@@ -193,6 +197,7 @@ def test(model, dataloader, **varargs):
     for it, batch in enumerate(dataloader):
         with torch.no_grad():
             # Extract data
+
             img = batch["img"].cuda(device=varargs["device"], non_blocking=True)
 
             data_time_meter.update(torch.tensor(time.time() - data_time))
@@ -201,6 +206,7 @@ def test(model, dataloader, **varargs):
 
             # Run network
             _, pred, _ = model(img=img, do_loss=False, do_prediction=True)
+
 
             # Update meters
             batch_time_meter.update(torch.tensor(time.time() - batch_time))
@@ -260,6 +266,7 @@ def save_prediction_image(_, panoptic_pred, img_info, out_dir, colors, num_stuff
     sem[crowd == 1] = 255
 
     sem_img = Image.fromarray(colors[sem])
+
     sem_img = sem_img.resize(img_info["original_size"][::-1])
 
     # Render contours
@@ -297,8 +304,49 @@ def save_prediction_raw(raw_pred, _, img_info, out_dir):
     }
     torch.save(out_data, out_path)
 
+    # text file
+    out_file = path.join(out_dir, img_name + "_pano.txt")
+    file = open(out_file, "w")
+
+    bbx_pred, cls_pred, obj_pred, msk_pred = raw_pred
+
+    sem_pred = raw_pred[0]
+    bbx_pred = raw_pred[1]
+    cls_pred = raw_pred[2]
+    obj_pred = raw_pred[3]
+    msk_pred = raw_pred[4]
+
+
+    scale_factor = [os / bs for os, bs in zip(img_info["original_size"], img_info["batch_size"])]
+    bbx_pred[:, [0, 2]] = bbx_pred[:, [0, 2]] * scale_factor[0]
+    bbx_pred[:, [1, 3]] = bbx_pred[:, [1, 3]] * scale_factor[1]
+
+    for bbx_pred_i, cls_pred_i, obj_pred_i, msk_pred_i in zip(bbx_pred, cls_pred, obj_pred, msk_pred):
+        if obj_pred_i >= 0.5:
+            file.write("\n {0} {1}".format("class   ", str(cls_pred_i.item())))
+            file.write("\n {0} {1}".format("object   ", str(obj_pred_i.item())))
+            file.write("\n {0} {1} {2} {3} {4}".format("bbox   ",
+                                                       str(bbx_pred_i[0].item()),
+                                                       str(bbx_pred_i[1].item()),
+                                                       str(bbx_pred_i[2].item()),
+                                                       str(bbx_pred_i[3].item())
+                                                       )
+                       )
+            file.write("\n")
+
+def convertToRGB(args):
+    imageList = [img for img in glob.glob(str(args.data) + '*')]
+    for img in imageList:
+        image = cv.imread(img)
+        image = cv.cvtColor(image, cv.COLOR_BGRA2BGR)
+        cv.imwrite(img, image)
 
 def main(args):
+    # convert images to RGB
+    convertToRGB(args)
+
+    print("DONE.......")
+
     # Initialize multi-processing
     distributed.init_process_group(backend='nccl', init_method='env://')
     device_id, device = args.local_rank, torch.device(args.local_rank)

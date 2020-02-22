@@ -10,6 +10,11 @@ import umsgpack
 from PIL import Image, ImageDraw
 from torch import distributed
 
+import numpy as np
+
+
+import math
+
 import seamseg.models as models
 from seamseg.algos.detection import PredictionGenerator as BbxPredictionGenerator, DetectionLoss, \
     ProposalMatcher
@@ -34,8 +39,9 @@ parser = argparse.ArgumentParser(description="Instance segmentation testing scri
 parser.add_argument("--local_rank", type=int)
 parser.add_argument("--log_dir", type=str, default=".", help="Write logs to the given directory")
 parser.add_argument("--meta", type=str, help="Path to metadata file of training dataset")
-parser.add_argument("--threshold", type=float, default=0.5, help="Detection confidence threshold (only for image mode)")
+parser.add_argument("--threshold", type=float, default=0.7, help="Detection confidence threshold (only for image mode)")
 parser.add_argument("--raw", action="store_true", help="Save raw predictions instead of rendered images")
+parser.add_argument("--person", type=str, default='', help="Detect specific class")
 parser.add_argument("config", metavar="FILE", type=str, help="Path to configuration file")
 parser.add_argument("model", metavar="FILE", type=str, help="Path to model file")
 parser.add_argument("data", metavar="DIR", type=str, help="Path to dataset")
@@ -195,6 +201,9 @@ def test(model, dataloader, **varargs):
                 }
 
                 raw_pred = (bbx_pred, cls_pred, obj_pred, msk_pred)
+
+
+
                 varargs["save_function"](raw_pred, img_info)
 
             # Log batch
@@ -218,7 +227,7 @@ def ensure_dir(dir_path):
         pass
 
 
-def save_prediction_image(raw_pred, img_info, out_dir, colors, num_stuff, threshold):
+def save_prediction_image(raw_pred, img_info, out_dir, colors, num_stuff, threshold, obj_cls):
     bbx_pred, cls_pred, obj_pred, msk_pred = raw_pred
     img = Image.open(img_info["abs_path"])
     draw = ImageDraw.Draw(img)
@@ -242,23 +251,61 @@ def save_prediction_image(raw_pred, img_info, out_dir, colors, num_stuff, thresh
         msk_pred.cpu().unsqueeze(1).sigmoid(), bbx_inv.cpu(), bbx_idx, list(img_info["original_size"]), padding="zero")
     msk_pred = msk_pred.squeeze(1) > 0.5
 
+
+    print(type(msk_pred))
+
+    id = 1
     for bbx_pred_i, cls_pred_i, obj_pred_i, msk_pred_i in zip(bbx_pred, cls_pred, obj_pred, msk_pred):
         color = colors[cls_pred_i.item() + num_stuff]
-        if obj_pred_i.item() > threshold:
-            msk = Image.fromarray(msk_pred_i.numpy() * 192)
-            draw.bitmap((0, 0), msk, tuple(color))
 
-            draw.rectangle((
-                bbx_pred_i[1].item(),
-                bbx_pred_i[0].item(),
-                bbx_pred_i[3].item(),
-                bbx_pred_i[2].item(),
-            ), outline=tuple(color), width=3)
+        if obj_pred_i.item() > threshold:
+            if not obj_cls:
+                # detect ALL
+                msk = Image.fromarray(msk_pred_i.numpy() * 192)
+                draw.bitmap((0, 0), msk, tuple(color))
+
+                draw.rectangle((
+                    bbx_pred_i[1].item(),
+                    bbx_pred_i[0].item(),
+                    bbx_pred_i[3].item(),
+                    bbx_pred_i[2].item(),
+                ), outline=tuple(color), width=3)
+
+            if str(cls_pred_i.item()) == obj_cls:
+                # detect specific class
+                msk = Image.fromarray(msk_pred_i.numpy() * 192)
+                draw.bitmap((0, 0), msk, tuple(color))
+
+                draw.rectangle((
+                    bbx_pred_i[1].item(),
+                    bbx_pred_i[0].item(),
+                    bbx_pred_i[3].item(),
+                    bbx_pred_i[2].item(),
+                ), outline=tuple(color), width=3)
+
+                _dict = {
+                    'id': id,
+                    'bbox': {
+                        'x1': bbx_pred_i[0].item(),
+                        'y1': bbx_pred_i[1].item(),
+                        'x2': bbx_pred_i[2].item(),
+                        'y2': bbx_pred_i[3].item(),
+                    },
+                    'cls_pred': cls_pred_i.item(),
+                    'obj_pred': obj_pred_i.item(),
+                    'msk_pred': msk_pred_i.data.numpy(),
+                }
+                if not path.isdir(path.join(out_dir, img_name)):
+                    mkdir(path.join(out_dir, img_name))
+
+                np.save(path.join(out_dir, img_name + '/' + str(id)), _dict)
+                id = id +1
+
 
     img.convert(mode="RGB").save(out_path)
 
 
-def save_prediction_raw(raw_pred, img_info, out_dir):
+def save_prediction_raw(raw_pred, img_info, out_dir, threshold, obj_cls):
     # Prepare folders and paths
     folder, img_name = path.split(img_info["rel_path"])
     img_name, _ = path.splitext(img_name)
@@ -272,7 +319,57 @@ def save_prediction_raw(raw_pred, img_info, out_dir):
         "obj_pred": raw_pred[2],
         "msk_pred": raw_pred[3]
     }
-    torch.save(out_data, out_path)
+    #torch.save(out_data, out_path)
+
+    # text file
+    #out_file = path.join(out_dir, img_name + "_instance.txt")
+    #file = open(out_file, "w")
+
+    bbx_pred, cls_pred, obj_pred, msk_pred = raw_pred
+
+    scale_factor = [os / bs for os, bs in zip(img_info["original_size"], img_info["batch_size"])]
+    bbx_pred[:, [0, 2]] = bbx_pred[:, [0, 2]] * scale_factor[0]
+    bbx_pred[:, [1, 3]] = bbx_pred[:, [1, 3]] * scale_factor[1]
+
+    for bbx_pred_i, cls_pred_i, obj_pred_i, msk_pred_i in zip(bbx_pred, cls_pred, obj_pred, msk_pred):
+        if obj_pred_i >= threshold:
+            print("..")
+
+
+
+
+
+    '''''
+                
+            temp = '{0} {1} {2:.5f} {3} {4} {5} {6} {7}\n'
+
+
+            if not obj_cls:
+                file.write(temp.format(
+                    str(img_name)+'.png',
+                    str(obj_cls),
+                    obj_pred_i.item(),
+                    str(math.floor(bbx_pred_i[1].item())),
+                    str(math.floor(bbx_pred_i[0].item())),
+                    str(math.floor(bbx_pred_i[3].item())),
+                    str(math.floor(bbx_pred_i[2].item())),
+                    str((msk_pred_i))
+                )
+                )
+            if str(cls_pred_i.item()) == obj_cls:
+                file.write(temp.format(
+                    str(img_name)+'.png',
+                    str(1),                           ## map person class from Mapillary to Frustum (3) -- > (1)
+                    obj_pred_i.item(),
+                    str(math.floor(bbx_pred_i[1].item())),
+                    str(math.floor(bbx_pred_i[0].item())),
+                    str(math.floor(bbx_pred_i[3].item())),
+                    str(math.floor(bbx_pred_i[2].item())),
+                    str((msk_pred_i))
+                )
+                )
+'''''
+
 
 
 def main(args):
@@ -305,11 +402,11 @@ def main(args):
     model = DistributedDataParallel(model.cuda(device), device_ids=[device_id], output_device=device_id)
 
     if args.raw:
-        save_function = partial(save_prediction_raw, out_dir=args.out_dir)
+        save_function = partial(save_prediction_raw, out_dir=args.out_dir, threshold=args.threshold, obj_cls=args.person)
     else:
         save_function = partial(
             save_prediction_image, out_dir=args.out_dir, colors=meta["palette"],
-            num_stuff=meta["num_stuff"], threshold=args.threshold)
+            num_stuff=meta["num_stuff"], threshold=args.threshold, obj_cls=args.person)
     test(model, test_dataloader, device=device, summary=None,
          log_interval=config["general"].getint("log_interval"), save_function=save_function)
 
