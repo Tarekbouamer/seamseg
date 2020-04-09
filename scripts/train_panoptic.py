@@ -153,26 +153,39 @@ def make_model(config, num_thing, num_stuff):
                                            rpn_config.getint("num_pre_nms_val"),
                                            rpn_config.getint("num_post_nms_val"),
                                            rpn_config.getint("min_size"))
+
     anchor_matcher = AnchorMatcher(rpn_config.getint("num_samples"),
                                    rpn_config.getfloat("pos_ratio"),
                                    rpn_config.getfloat("pos_threshold"),
                                    rpn_config.getfloat("neg_threshold"),
                                    rpn_config.getfloat("void_threshold"))
+
     rpn_loss = RPNLoss(rpn_config.getfloat("sigma"))
-    rpn_algo = RPNAlgoFPN(
-        proposal_generator, anchor_matcher, rpn_loss,
-        rpn_config.getint("anchor_scale"), rpn_config.getstruct("anchor_ratios"),
-        fpn_config.getstruct("out_strides"), rpn_config.getint("fpn_min_level"), rpn_config.getint("fpn_levels"))
-    rpn_head = RPNHead(
-        fpn_config.getint("out_channels"), len(rpn_config.getstruct("anchor_ratios")), 1,
-        rpn_config.getint("hidden_channels"), norm_act_dynamic)
+
+    rpn_algo = RPNAlgoFPN(proposal_generator,
+                          anchor_matcher,
+                          rpn_loss,
+                          rpn_config.getint("anchor_scale"),
+                          rpn_config.getstruct("anchor_ratios"),
+                          fpn_config.getstruct("out_strides"),
+                          rpn_config.getint("fpn_min_level"),
+                          rpn_config.getint("fpn_levels"))
+
+    rpn_head = RPNHead(fpn_config.getint("out_channels"),
+                       len(rpn_config.getstruct("anchor_ratios")),
+                       1,
+                       rpn_config.getint("hidden_channels"),
+                       norm_act_dynamic)
 
     # Create instance segmentation network
     bbx_prediction_generator = BbxPredictionGenerator(roi_config.getfloat("nms_threshold"),
                                                       roi_config.getfloat("score_threshold"),
                                                       roi_config.getint("max_predictions"))
+
     msk_prediction_generator = MskPredictionGenerator()
+
     roi_size = roi_config.getstruct("roi_size")
+
     proposal_matcher = ProposalMatcher(classes,
                                        roi_config.getint("num_samples"),
                                        roi_config.getfloat("pos_ratio"),
@@ -180,19 +193,36 @@ def make_model(config, num_thing, num_stuff):
                                        roi_config.getfloat("neg_threshold_hi"),
                                        roi_config.getfloat("neg_threshold_lo"),
                                        roi_config.getfloat("void_threshold"))
+
     bbx_loss = DetectionLoss(roi_config.getfloat("sigma"))
+
     msk_loss = InstanceSegLoss()
+
     lbl_roi_size = tuple(s * 2 for s in roi_size)
-    roi_algo = InstanceSegAlgoFPN(
-        bbx_prediction_generator, msk_prediction_generator, proposal_matcher, bbx_loss, msk_loss, classes,
-        roi_config.getstruct("bbx_reg_weights"), roi_config.getint("fpn_canonical_scale"),
-        roi_config.getint("fpn_canonical_level"), roi_size, roi_config.getint("fpn_min_level"),
-        roi_config.getint("fpn_levels"), lbl_roi_size, roi_config.getboolean("void_is_background"))
+
+    roi_algo = InstanceSegAlgoFPN(bbx_prediction_generator,
+                                  msk_prediction_generator,
+                                  proposal_matcher,
+                                  bbx_loss,
+                                  msk_loss,
+                                  classes,
+                                  roi_config.getstruct("bbx_reg_weights"),
+                                  roi_config.getint("fpn_canonical_scale"),
+                                  roi_config.getint("fpn_canonical_level"),
+                                  roi_size,
+                                  roi_config.getint("fpn_min_level"),
+                                  roi_config.getint("fpn_levels"),
+                                  lbl_roi_size,
+                                  roi_config.getboolean("void_is_background"))
+
     roi_head = FPNMaskHead(fpn_config.getint("out_channels"), classes, roi_size, norm_act=norm_act_dynamic)
 
     # Create semantic segmentation network
+
     sem_loss = SemanticSegLoss(ohem=sem_config.getfloat("ohem"))
+
     sem_algo = SemanticSegAlgo(sem_loss, classes["total"])
+
     sem_head = FPNSemanticHeadDeeplab(fpn_config.getint("out_channels"),
                                       sem_config.getint("fpn_min_level"),
                                       sem_config.getint("fpn_levels"),

@@ -25,10 +25,13 @@ class RPNHead(nn.Module):
 
         self.conv1 = nn.Conv2d(in_channels, hidden_channels, 3, padding=1, stride=stride, bias=False)
         self.bn1 = norm_act(hidden_channels)
+
         self.conv_obj = nn.Conv2d(hidden_channels, num_anchors, 1)
+
         self.conv_bbx = nn.Conv2d(hidden_channels, num_anchors * 4, 1)
 
         self.reset_parameters()
+
 
     def reset_parameters(self):
         activation = self.bn1.activation

@@ -38,7 +38,7 @@ class PredictionGenerator:
         else:
             return None, None, None
 
-    def __call__(self, boxes, scores):
+    def __call__(self, boxes, scores, indices, stage):
         """Perform NMS-based selection of detections
 
         Parameters
@@ -60,22 +60,26 @@ class PredictionGenerator:
             A sequence of N tensors of detection confidences with shapes S_i, entries are None for images in which no
             detection can be kept according to the selection parameters
         """
-        bbx_pred, cls_pred, obj_pred = [], [], []
-        for bbx_i, obj_i in zip(boxes, scores):
+
+        bbx_pred, cls_pred, obj_pred, indices_pred = [], [], [], []
+
+        for bbx_i, obj_i, index_i in zip(boxes, scores, indices):
             try:
                 if bbx_i is None or obj_i is None:
                     raise Empty
 
                 # Do NMS separately for each class
-                bbx_pred_i, cls_pred_i, obj_pred_i = [], [], []
-                for cls_id, (bbx_cls_i, obj_cls_i) in enumerate(zip(torch.unbind(bbx_i, dim=1),
-                                                                    torch.unbind(obj_i, dim=1)[1:])):
+                bbx_pred_i, cls_pred_i, obj_pred_i, indices_pred_i = [], [], [], []
+                for cls_id, (bbx_cls_i, obj_cls_i, index_cls_i) in enumerate(zip(torch.unbind(bbx_i, dim=1),
+                                                                                 torch.unbind(obj_i, dim=1)[1:],
+                                                                                 torch.unbind(index_i, dim=1))):
                     # Filter out low-scoring predictions
                     idx = obj_cls_i > self.score_threshold
                     if not idx.any().item():
                         continue
                     bbx_cls_i = bbx_cls_i[idx]
                     obj_cls_i = obj_cls_i[idx]
+                    index_cls_i = index_cls_i[idx]
 
                     # Filter out empty predictions
                     idx = (bbx_cls_i[:, 2] > bbx_cls_i[:, 0]) & (bbx_cls_i[:, 3] > bbx_cls_i[:, 1])
@@ -83,18 +87,21 @@ class PredictionGenerator:
                         continue
                     bbx_cls_i = bbx_cls_i[idx]
                     obj_cls_i = obj_cls_i[idx]
+                    index_cls_i = index_cls_i[idx]
 
                     # Do NMS
-                    idx = nms(bbx_cls_i.contiguous(), obj_cls_i.contiguous(), threshold=self.nms_threshold, n_max=-1)
+                    idx = nms(bbx_cls_i.contiguous(), obj_cls_i.contiguous(), threshold=self.nms_threshold[stage], n_max=-1)
                     if idx.numel() == 0:
                         continue
                     bbx_cls_i = bbx_cls_i[idx]
                     obj_cls_i = obj_cls_i[idx]
+                    index_cls_i = index_cls_i[idx]
 
                     # Save remaining outputs
                     bbx_pred_i.append(bbx_cls_i)
                     cls_pred_i.append(bbx_cls_i.new_full((bbx_cls_i.size(0),), cls_id, dtype=torch.long))
                     obj_pred_i.append(obj_cls_i)
+                    indices_pred_i.append(index_cls_i)
 
                 # Compact predictions from the classes
                 if len(bbx_pred_i) == 0:
@@ -102,6 +109,7 @@ class PredictionGenerator:
                 bbx_pred_i = torch.cat(bbx_pred_i, dim=0)
                 cls_pred_i = torch.cat(cls_pred_i, dim=0)
                 obj_pred_i = torch.cat(obj_pred_i, dim=0)
+                indices_pred_i = torch.cat(indices_pred_i, dim=0)
 
                 # Do post-NMS selection (if needed)
                 if bbx_pred_i.size(0) > self.max_predictions:
@@ -109,17 +117,21 @@ class PredictionGenerator:
                     bbx_pred_i = bbx_pred_i[idx]
                     cls_pred_i = cls_pred_i[idx]
                     obj_pred_i = obj_pred_i[idx]
+                    indices_pred_i = indices_pred_i[idx]
 
                 # Save results
                 bbx_pred.append(bbx_pred_i)
                 cls_pred.append(cls_pred_i)
                 obj_pred.append(obj_pred_i)
+                indices_pred.append(indices_pred_i)
+
             except Empty:
                 bbx_pred.append(None)
                 cls_pred.append(None)
                 obj_pred.append(None)
+                indices_pred.append(None)
 
-        return PackedSequence(bbx_pred), PackedSequence(cls_pred), PackedSequence(obj_pred)
+        return PackedSequence(bbx_pred), PackedSequence(cls_pred), PackedSequence(obj_pred), PackedSequence(indices_pred)
 
 
 class ProposalMatcher:
@@ -145,13 +157,16 @@ class ProposalMatcher:
 
     def __init__(self,
                  classes,
+                 num_stages=1,
                  num_samples=128,
                  pos_ratio=0.25,
                  pos_threshold=0.5,
                  neg_threshold_hi=0.5,
                  neg_threshold_lo=0.0,
                  void_threshold=0.):
+
         self.num_stuff = classes["stuff"]
+        self.num_stages = num_stages
         self.num_samples = num_samples
         self.pos_ratio = pos_ratio
         self.pos_threshold = pos_threshold
@@ -185,11 +200,7 @@ class ProposalMatcher:
 
         return pos_idx, neg_idx
 
-    def __call__(self,
-                 proposals,
-                 bbx,
-                 cat,
-                 iscrowd):
+    def __call__(self, proposals, bbx, cat, iscrowd, stage):
         """Match proposals to ground truth boxes
 
         Parameters
@@ -218,7 +229,11 @@ class ProposalMatcher:
         out_proposals = []
         match = []
 
+        total_proposals = []
+        indices = []
+
         for proposals_i, bbx_i, cat_i, iscrowd_i in zip(proposals, bbx, cat, iscrowd):
+
             try:
                 # Append proposals to ground truth bounding boxes before proceeding
                 if bbx_i is not None and proposals_i is not None:
@@ -247,8 +262,13 @@ class ProposalMatcher:
                     iou = ious(proposals_i, bbx_i)
                     best_iou, best_gt = iou.max(dim=1)
 
-                    pos_idx = best_iou >= self.pos_threshold
-                    neg_idx = (best_iou >= self.neg_threshold_lo) & (best_iou < self.neg_threshold_hi)
+                    pos_idx = best_iou >= self.pos_threshold[stage]
+
+                    if stage == 0:
+                        neg_idx = (best_iou >= self.neg_threshold_lo) & (best_iou < self.neg_threshold_hi)
+                    else:
+                        neg_idx = (best_iou >= self.neg_threshold_lo) & (best_iou < self.pos_threshold[stage-1])
+
                 else:
                     # No ground truth boxes: all proposals that are non-void are negative
                     pos_idx = proposals_i.new_zeros(proposals_i.size(0), dtype=torch.uint8)
@@ -257,10 +277,17 @@ class ProposalMatcher:
                 # Check that there are still some non-voids and do sub-sampling
                 if not pos_idx.any().item() and not neg_idx.any().item():
                     raise Empty
+
+                # Subsample and Get indices
                 pos_idx, neg_idx = self._subsample(pos_idx, neg_idx)
+                idx = torch.cat([pos_idx, neg_idx])
 
                 # Gather selected proposals
-                out_proposals_i = proposals_i[torch.cat([pos_idx, neg_idx])]
+                out_proposals_i = proposals_i[idx]
+
+                # Save proposals and their indices for next stage
+                total_proposals.append(proposals_i)
+                indices.append(idx)
 
                 # Save matching
                 match_i = out_proposals_i.new_full((out_proposals_i.size(0),), -1, dtype=torch.long)
@@ -273,7 +300,7 @@ class ProposalMatcher:
                 out_proposals.append(None)
                 match.append(None)
 
-        return PackedSequence(out_proposals), PackedSequence(match)
+        return PackedSequence(out_proposals), PackedSequence(match), PackedSequence(total_proposals), PackedSequence(indices)
 
 
 class DetectionLoss:

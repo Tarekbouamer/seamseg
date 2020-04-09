@@ -39,7 +39,7 @@ parser = argparse.ArgumentParser(description="Instance segmentation testing scri
 parser.add_argument("--local_rank", type=int)
 parser.add_argument("--log_dir", type=str, default=".", help="Write logs to the given directory")
 parser.add_argument("--meta", type=str, help="Path to metadata file of training dataset")
-parser.add_argument("--threshold", type=float, default=0.7, help="Detection confidence threshold (only for image mode)")
+parser.add_argument("--threshold", type=float, default=0.9, help="Detection confidence threshold (only for image mode)")
 parser.add_argument("--raw", action="store_true", help="Save raw predictions instead of rendered images")
 parser.add_argument("--person", type=str, default='', help="Detect specific class")
 parser.add_argument("config", metavar="FILE", type=str, help="Path to configuration file")

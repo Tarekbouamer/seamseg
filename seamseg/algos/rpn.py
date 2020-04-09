@@ -53,9 +53,9 @@ class ProposalGenerator:
         Parameters
         ----------
         boxes : torch.Tensor
-            Tensor of bounding boxes with shape N x M
+            Tensor of bounding boxes with shape N x M x 4
         scores : torch.Tensor
-            Tensor of bounding box scores with shape N x M x 4
+            Tensor of bounding box scores with shape N x M
         training : bool
             Switch between training and validation modes
 
@@ -72,9 +72,10 @@ class ProposalGenerator:
             num_post_nms = self.num_post_nms_val
 
         proposals = []
+        indices = []
         for bbx_i, obj_i in zip(boxes, scores):
             try:
-                # Optional size pre-selection
+                # Optional size pre-selection, remove very small boxes
                 if self.min_size > 0:
                     bbx_size = bbx_i[:, 2:] - bbx_i[:, :2]
                     valid = (bbx_size[:, 0] >= self.min_size) & (bbx_size[:, 1] >= self.min_size)
@@ -84,21 +85,27 @@ class ProposalGenerator:
                     else:
                         raise Empty
 
-                # Score pre-selection
+                # Score pre-selection pick top num_pre_nms ones
+
                 obj_i, idx = obj_i.topk(min(obj_i.size(0), num_pre_nms))
+
                 bbx_i = bbx_i[idx]
 
                 # NMS
-                idx = nms(bbx_i, obj_i, self.nms_threshold, num_post_nms)
-                if idx.numel() == 0:
-                    raise Empty
-                bbx_i = bbx_i[idx]
+                _idx = nms(bbx_i, obj_i, self.nms_threshold, num_post_nms)
 
+                if _idx.numel() == 0:
+                    raise Empty
+                bbx_i = bbx_i[_idx]
+
+                indices.append(idx[_idx])
                 proposals.append(bbx_i)
+
             except Empty:
+                indices.append(None)
                 proposals.append(None)
 
-        return PackedSequence(proposals)
+        return PackedSequence(proposals), indices
 
 
 class AnchorMatcher:
@@ -124,11 +131,14 @@ class AnchorMatcher:
                  pos_threshold=.7,
                  neg_threshold=.3,
                  void_threshold=0.):
+
         self.num_samples = num_samples
         self.pos_ratio = pos_ratio
         self.pos_threshold = pos_threshold
         self.neg_threshold = neg_threshold
         self.void_threshold = void_threshold
+
+
 
     def _subsample(self, match):
         num_pos = int(self.num_samples * self.pos_ratio)
@@ -150,29 +160,7 @@ class AnchorMatcher:
         p0y, p0x, p1y, p1x = bbx[:, 0], bbx[:, 1], bbx[:, 2], bbx[:, 3]
         return (p0y >= 0) & (p0x >= 0) & (p1y <= valid_size[0]) & (p1x <= valid_size[1])
 
-    def __call__(self, anchors, bbx, iscrowd, valid_size):
-        """Match anchors to ground truth boxes
-
-        Parameters
-        ----------
-        anchors : torch.Tensor
-            Tensors of anchor bounding boxes with shapes M x 4
-        bbx : sequence of torch.Tensor
-            Sequence of N tensors of ground truth bounding boxes with shapes M_i x 4, entries can be None
-        iscrowd : sequence of torch.Tensor
-            Sequence of N tensors of ground truth crowd regions (shapes H_i x W_i), or ground truth crowd bounding boxes
-            (shapes K_i x 4), entries can be None
-        valid_size : list of tuple of int
-            List of N valid image sizes in input coordinates
-
-        Returns
-        -------
-        match : torch.Tensor
-            Tensor of matching results with shape N x M, with the following semantic:
-              - match[i, j] == -2: the j-th anchor in image i is void
-              - match[i, j] == -1: the j-th anchor in image i is negative
-              - match[i, j] == k, k >= 0: the j-th anchor in image i is matched to bbx[i][k]
-        """
+    def zero_matcher(self, anchors, bbx, iscrowd, valid_size):
         match = []
         for bbx_i, iscrowd_i, valid_size_i in zip(bbx, iscrowd, valid_size):
             # Default labels: everything is void
@@ -200,6 +188,7 @@ class AnchorMatcher:
                 if bbx_i is not None:
                     max_a2g_iou = bbx_i.new_zeros(valid_anchors.size(0))
                     max_a2g_idx = bbx_i.new_full((valid_anchors.size(0),), -1, dtype=torch.long)
+
                     max_g2a_iou = []
                     max_g2a_idx = []
 
@@ -216,36 +205,64 @@ class AnchorMatcher:
 
                         # GT -> Anchor
                         max_g2a_iou_j, max_g2a_idx_j = iou.max(dim=0)
+
                         max_g2a_iou.append(max_g2a_iou_j)
                         max_g2a_idx.append(max_g2a_idx_j)
 
-                        del iou
+                        # del iou
 
                     max_g2a_iou = torch.cat(max_g2a_iou, dim=0)
                     max_g2a_idx = torch.cat(max_g2a_idx, dim=0)
 
-                    a2g_pos = max_a2g_iou >= self.pos_threshold
-                    a2g_neg = max_a2g_iou < self.neg_threshold
-                    g2a_pos = max_g2a_iou > 0
+                    a2g_pos = max_a2g_iou >= self.pos_threshold  # higher than thd as positive label
+
+                    a2g_neg = max_a2g_iou < self.neg_threshold  # lower than thd as negative label
+
+                    g2a_pos = max_g2a_iou > 0  # highest IOU
 
                     valid_match = valid_anchors.new_full((valid_anchors.size(0),), -2, dtype=torch.long)
                     valid_match[a2g_pos] = max_a2g_idx[a2g_pos]
                     valid_match[a2g_neg] = -1
                     valid_match[max_g2a_idx[g2a_pos]] = g2a_pos.nonzero().squeeze()
+
                 else:
                     # No ground truth boxes for this image: everything that is not void is negative
                     valid_match = valid_anchors.new_full((valid_anchors.size(0),), -1, dtype=torch.long)
 
                 # Subsample positives and negatives
                 self._subsample(valid_match)
-
                 match_i[valid] = valid_match
+
             except Empty:
                 pass
 
             match.append(match_i)
-
         return torch.stack(match, dim=0)
+
+    def __call__(self, anchors, bbx, iscrowd, valid_size):
+        """Match anchors to ground truth boxes
+
+        Parameters
+        ----------
+        anchors : torch.Tensor
+            Tensors of anchor bounding boxes with shapes M x 4 from all Fpn levels (shifted base anchors from all levels)
+        bbx : sequence of torch.Tensor
+            Sequence of N tensors of ground truth bounding boxes with shapes M_i x 4, entries can be None
+        iscrowd : sequence of torch.Tensor
+            Sequence of N tensors of ground truth crowd regions (shapes H_i x W_i), or ground truth crowd bounding boxes
+            (shapes K_i x 4), entries can be None
+        valid_size : list of tuple of int
+            List of N valid image sizes in input coordinates
+
+        Returns
+        -------
+        match : torch.Tensor
+            Tensor of matching results with shape N x M, with the following semantic:
+              - match[i, j] == -2: the j-th anchor in image i is void
+              - match[i, j] == -1: the j-th anchor in image i is negative
+              - match[i, j] == k, k >= 0: the j-th anchor in image i is matched to bbx[i][k]
+        """
+        return self.zero_matcher(anchors, bbx, iscrowd, valid_size)
 
 
 class RPNLoss:
@@ -292,17 +309,22 @@ class RPNLoss:
         # Get contiguous view of the labels
         positives = obj_lbl == 1
         non_void = obj_lbl != -1
+
         num_non_void = non_void.float().sum()
 
         # Objectness loss
-        obj_loss = functional.binary_cross_entropy_with_logits(
-            obj_logits, positives.float(), non_void.float(), reduction="sum")
+        obj_loss = functional.binary_cross_entropy_with_logits(obj_logits,
+                                                               positives.float(),
+                                                               non_void.float(),
+                                                               reduction="sum")
         obj_loss *= torch.clamp(1. / num_non_void, max=1.)
 
         # Bounding box regression loss
         if positives.any().item():
             bbx_logits = bbx_logits[positives.unsqueeze(-1).expand_as(bbx_logits)]
             bbx_lbl = bbx_lbl[positives.unsqueeze(-1).expand_as(bbx_lbl)]
+
+            #only positive terms get regressed
             bbx_loss = self.bbx_loss(bbx_logits, bbx_lbl, num_non_void)
         else:
             bbx_loss = bbx_logits.sum() * 0
@@ -326,7 +348,7 @@ class RPNAlgo:
         self.anchor_ratios = anchor_ratios
 
     def _base_anchors(self, stride):
-        # Pre-generate per-cell anchors
+        # Pre-generate per-cell anchors base anchors
         anchors = []
         center = stride / 2.
         for scale in self.anchor_scales:
@@ -346,13 +368,22 @@ class RPNAlgo:
 
     @staticmethod
     def _shifted_anchors(anchors, stride, height, width, dtype=torch.float32, device="cpu"):
+
+        # TODO: implement this in colab to get exact dimentions 
+
         grid_y = torch.arange(0, stride * height, stride, dtype=dtype, device=device)
         grid_x = torch.arange(0, stride * width, stride, dtype=dtype, device=device)
+
         grid = torch.stack([grid_y.view(-1, 1).repeat(1, width), grid_x.view(1, -1).repeat(height, 1)], dim=-1)
 
         anchors = torch.tensor(anchors, dtype=dtype, device=device)
+
+        #  Grid with H*W*2  repeat 2 to fit 4 anchor size H*W*4
+        #
         shifted_anchors = anchors.view(1, 1, -1, 4) + grid.repeat(1, 1, 2).unsqueeze(2)
-        return shifted_anchors.view(-1, 4)
+        out = shifted_anchors.view(-1, 4)
+
+        return out
 
     @staticmethod
     def _match_to_lbl(anchors, bbx, match):
@@ -367,6 +398,7 @@ class RPNAlgo:
         bbx_lbl = anchors.new_zeros(len(bbx), anchors.size(0), anchors.size(1))
         for i, (pos_i, bbx_i, match_i) in enumerate(zip(pos, bbx, match)):
             if pos_i.any():
+                # between anchors and bbox GT
                 bbx_lbl[i, pos_i] = calculate_shift(anchors[pos_i], bbx_i[match_i[pos_i]])
 
         return obj_lbl, bbx_lbl

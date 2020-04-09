@@ -11,12 +11,16 @@ NETWORK_INPUTS = ["img", "msk", "cat", "iscrowd", "bbx"]
 class InstanceSegNet(nn.Module):
     def __init__(self,
                  body,
+
                  rpn_head,
                  roi_head,
+
                  rpn_algo,
                  instance_seg_algo,
                  classes):
+
         super(InstanceSegNet, self).__init__()
+
         self.num_stuff = classes["stuff"]
 
         # Modules
@@ -30,7 +34,9 @@ class InstanceSegNet(nn.Module):
 
     def _prepare_inputs(self, msk, cat, iscrowd, bbx):
         cat_out, iscrowd_out, bbx_out, ids_out = [], [], [], []
+
         for msk_i, cat_i, iscrowd_i, bbx_i in zip(msk, cat, iscrowd, bbx):
+
             thing = (cat_i >= self.num_stuff) & (cat_i != 255)
             valid = thing & ~iscrowd_i
 
@@ -52,51 +58,85 @@ class InstanceSegNet(nn.Module):
         return cat_out, iscrowd_out, bbx_out, ids_out
 
     def forward(self, img, msk=None, cat=None, iscrowd=None, bbx=None, do_loss=False, do_prediction=True):
-        # Pad the input images
+        # (1) Pad the input images
+        # img (N*C3*H,W)  , valid size = list original size
+
         img, valid_size = pad_packed_images(img)
-        img_size = img.shape[-2:]
+        img_size = img.shape[-2:]  # img (C,H,W)
+        #print('img', img.shape)
+        #print('valid_size', len(valid_size))
 
         # Convert ground truth to the internal format
         if do_loss:
-            cat, iscrowd, bbx, ids = self._prepare_inputs(msk, cat, iscrowd, bbx)
+            # Returns cls:mask:bbox:id for GT
+            cat, iscrowd, bbx, ids = self._prepare_inputs(msk,
+                                                          cat,
+                                                          iscrowd,
+                                                          bbx)
 
-        # Run network body
+        # Run network body FPN (no Training for this , inference only)
         x = self.body(img)
+
+
+        # TODO, check the order P5-P1 or P1+P5
 
         # RPN part
         if do_loss:
-            obj_loss, bbx_loss, proposals = self.rpn_algo.training(
-                self.rpn_head, x, bbx, iscrowd, valid_size, training=self.training, do_inference=True)
+            obj_loss, bbx_loss, proposals = self.rpn_algo.training(self.rpn_head,
+                                                                   x,
+                                                                   bbx,
+                                                                   iscrowd,
+                                                                   valid_size,
+                                                                   training=self.training,
+                                                                   do_inference=True)
+
         elif do_prediction:
-            proposals = self.rpn_algo.inference(self.rpn_head, x, valid_size, self.training)
+            proposals = self.rpn_algo.inference(self.rpn_head,
+                                                x,
+                                                valid_size,
+                                                self.training)
             obj_loss, bbx_loss = None, None
         else:
             obj_loss, bbx_loss, proposals = None, None, None
 
         # ROI part
+
         if do_loss:
-            roi_cls_loss, roi_bbx_loss, roi_msk_loss = self.instance_seg_algo.training(
-                self.roi_head, x, proposals, bbx, cat, iscrowd, ids, msk, img_size)
+            roi_cls_loss, roi_bbx_loss, roi_msk_loss = self.instance_seg_algo.training(self.roi_head,
+                                                                                       x,
+                                                                                       proposals,
+                                                                                       bbx,
+                                                                                       cat,
+                                                                                       iscrowd,
+                                                                                       ids,
+                                                                                       msk,
+                                                                                       img_size,
+                                                                                       valid_size)
         else:
             roi_cls_loss, roi_bbx_loss, roi_msk_loss = None, None, None
+
+
         if do_prediction:
-            bbx_pred, cls_pred, obj_pred, msk_pred = self.instance_seg_algo.inference(
-                self.roi_head, x, proposals, valid_size, img_size)
+            bbx_pred, cls_pred, obj_pred, msk_pred = self.instance_seg_algo.inference(self.roi_head,
+                                                                                      x,
+                                                                                      proposals,
+                                                                                      valid_size,
+                                                                                      img_size)
         else:
             bbx_pred, cls_pred, obj_pred, msk_pred = None, None, None, None
 
         # Prepare outputs
-        loss = OrderedDict([
-            ("obj_loss", obj_loss),
-            ("bbx_loss", bbx_loss),
-            ("roi_cls_loss", roi_cls_loss),
-            ("roi_bbx_loss", roi_bbx_loss),
-            ("roi_msk_loss", roi_msk_loss)
-        ])
-        pred = OrderedDict([
-            ("bbx_pred", bbx_pred),
-            ("cls_pred", cls_pred),
-            ("obj_pred", obj_pred),
-            ("msk_pred", msk_pred)
-        ])
+        loss = OrderedDict([("obj_loss", obj_loss),
+                            ("bbx_loss", bbx_loss),
+                            ("roi_cls_loss", roi_cls_loss),
+                            ("roi_bbx_loss", roi_bbx_loss),
+                            ("roi_msk_loss", roi_msk_loss)
+                            ])
+
+        pred = OrderedDict([("bbx_pred", bbx_pred),
+                            ("cls_pred", cls_pred),
+                            ("obj_pred", obj_pred),
+                            ("msk_pred", msk_pred)
+                            ])
+
         return loss, pred

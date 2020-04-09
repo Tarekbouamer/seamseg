@@ -11,6 +11,7 @@ class PanopticPreprocessing:
                  overlap_threshold=0.5,
                  min_stuff_area=64 * 64):
         self.score_threshold = score_threshold
+
         self.overlap_threshold = overlap_threshold
         self.min_stuff_area = min_stuff_area
 
@@ -93,6 +94,7 @@ def panoptic_stats(msk_gt, cat_gt, panoptic_pred, num_classes, _num_stuff):
     # Move gt to CPU
     msk_gt, cat_gt = msk_gt.cpu(), cat_gt.cpu()
     msk_pred, cat_pred, _, iscrowd_pred = panoptic_pred
+
 
     # Convert crowd predictions to void
     msk_remap = msk_pred.new_zeros(cat_pred.numel())

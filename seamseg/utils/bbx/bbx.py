@@ -76,7 +76,7 @@ def shift_boxes(bbx, shift, dim=-1, scale_clip=log(1000. / 16.)):
 
 
 def calculate_shift(bbx0, bbx1, dim=-1, eps=1e-5):
-    """Calculate shift parameters between bounding boxes using the faster r-CNN formulas
+    """Calculate shift parameters between bounding boxes using the faster R-CNN formulas
 
     Each 4-vector of `bbx0` and `bbx1` contains bounding box coordiantes in "corners" form. The output is calculated
     according to the Faster r-CNN formulas:

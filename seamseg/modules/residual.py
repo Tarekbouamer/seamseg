@@ -67,9 +67,11 @@ class ResidualBlock(nn.Module):
             layers = [
                 ("conv1", nn.Conv2d(in_channels, channels[0], 1, stride=1, padding=0, bias=False)),
                 ("bn1", norm_act(channels[0])),
+
                 ("conv2", nn.Conv2d(channels[0], channels[1], 3, stride=stride, padding=dilation, bias=False,
                                     groups=groups, dilation=dilation)),
                 ("bn2", norm_act(channels[1])),
+
                 ("conv3", nn.Conv2d(channels[1], channels[2], 1, stride=1, padding=0, bias=False)),
                 ("bn3", bn3)
             ]

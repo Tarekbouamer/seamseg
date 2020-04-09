@@ -74,9 +74,16 @@ def make_dataloader(args, config, rank, world_size):
                             config.getstruct("rgb_std"),
                             config.getboolean("random_flip"),
                             config.getstruct("random_scale"))
-    train_db = ISSDataset(args.data, config["train_set"], train_tf)
-    train_sampler = DistributedARBatchSampler(
-        train_db, config.getint("train_batch_size"), world_size, rank, True)
+
+    train_db = ISSDataset(args.data,
+                          config["train_set"],
+                          train_tf)
+
+    train_sampler = DistributedARBatchSampler(train_db,
+                                              config.getint("train_batch_size"),
+                                              world_size,
+                                              rank,
+                                              True)
     train_dl = data.DataLoader(train_db,
                                batch_sampler=train_sampler,
                                collate_fn=iss_collate_fn,
@@ -88,9 +95,16 @@ def make_dataloader(args, config, rank, world_size):
                           config.getint("longest_max_size"),
                           config.getstruct("rgb_mean"),
                           config.getstruct("rgb_std"))
-    val_db = ISSDataset(args.data, config["val_set"], val_tf)
-    val_sampler = DistributedARBatchSampler(
-        val_db, config.getint("val_batch_size"), world_size, rank, False)
+
+    val_db = ISSDataset(args.data,
+                        config["val_set"],
+                        val_tf)
+
+    val_sampler = DistributedARBatchSampler(val_db,
+                                            config.getint("val_batch_size"),
+                                            world_size,
+                                            rank,
+                                            False)
     val_dl = data.DataLoader(val_db,
                              batch_sampler=val_sampler,
                              collate_fn=iss_collate_fn,
@@ -105,16 +119,25 @@ def make_model(config, num_thing, num_stuff):
     fpn_config = config["fpn"]
     rpn_config = config["rpn"]
     roi_config = config["roi"]
-    classes = {"total": num_thing + num_stuff, "stuff": num_stuff, "thing": num_thing}
+
+    classes = {"total": num_thing + num_stuff,
+               "stuff": num_stuff,
+               "thing": num_thing}
 
     # BN + activation
     norm_act_static, norm_act_dynamic = norm_act_from_config(body_config)
 
-    # Create backbone
+    # Create backbone (Bottom-up pathway) RESNET TODO: RESNEXT
+
     log_debug("Creating backbone model %s", body_config["body"])
+
     body_fn = models.__dict__["net_" + body_config["body"]]
+
     body_params = body_config.getstruct("body_params") if body_config.get("body_params") else {}
+
     body = body_fn(norm_act=norm_act_static, **body_params)
+
+    # Load parameters
     if body_config.get("weights"):
         body.load_state_dict(torch.load(body_config["weights"], map_location="cpu"))
 
@@ -126,42 +149,71 @@ def make_model(config, num_thing, num_stuff):
 
     body_channels = body_config.getstruct("out_channels")
 
-    # Create FPN
+    # Create FPN (Top-down pathway)
     fpn_inputs = fpn_config.getstruct("inputs")
+
     fpn = FPN([body_channels[inp] for inp in fpn_inputs],
               fpn_config.getint("out_channels"),
               fpn_config.getint("extra_scales"),
               norm_act_static,
               fpn_config["interpolation"])
-    body = FPNBody(body, fpn, fpn_inputs)
 
+    # body Bottom-up + Top-down forward pass
+    body = FPNBody(body, fpn, fpn_inputs)
     # Create RPN
+
+    # init ProposalGenerator
     proposal_generator = ProposalGenerator(rpn_config.getfloat("nms_threshold"),
                                            rpn_config.getint("num_pre_nms_train"),
                                            rpn_config.getint("num_post_nms_train"),
                                            rpn_config.getint("num_pre_nms_val"),
                                            rpn_config.getint("num_post_nms_val"),
                                            rpn_config.getint("min_size"))
-    anchor_matcher = AnchorMatcher(rpn_config.getint("num_samples"),
-                                   rpn_config.getfloat("pos_ratio"),
-                                   rpn_config.getfloat("pos_threshold"),
-                                   rpn_config.getfloat("neg_threshold"),
-                                   rpn_config.getfloat("void_threshold"))
+
+    # init AnchorMatcher
+    anchor_matcher = AnchorMatcher(rpn_config.getint("num_samples"),            # 256
+                                   rpn_config.getfloat("pos_ratio"),            # 0.5
+                                   rpn_config.getfloat("pos_threshold"),        # 0.7
+                                   rpn_config.getfloat("neg_threshold"),        # 0.3
+                                   rpn_config.getfloat("void_threshold"))       # 0.7
+
+    # init Loss TODO check sigma choice
     rpn_loss = RPNLoss(rpn_config.getfloat("sigma"))
-    rpn_algo = RPNAlgoFPN(
-        proposal_generator, anchor_matcher, rpn_loss,
-        rpn_config.getint("anchor_scale"), rpn_config.getstruct("anchor_ratios"),
-        fpn_config.getstruct("out_strides"), rpn_config.getint("fpn_min_level"), rpn_config.getint("fpn_levels"))
-    rpn_head = RPNHead(
-        fpn_config.getint("out_channels"), len(rpn_config.getstruct("anchor_ratios")), 1,
-        rpn_config.getint("hidden_channels"), norm_act_dynamic)
+
+    # FPN-based region proposal networks
+    rpn_algo = RPNAlgoFPN(proposal_generator,
+                          anchor_matcher,
+                          rpn_loss,
+
+                          rpn_config.getint("anchor_scale"),
+                          rpn_config.getstruct("anchor_ratios"),
+
+                          fpn_config.getstruct("out_strides"),
+                          rpn_config.getint("fpn_min_level"),
+                          rpn_config.getint("fpn_levels"))
+
+    # RPNHead for two sibling layers Cls Regs
+    rpn_head = RPNHead(fpn_config.getint("out_channels"),
+                       len(rpn_config.getstruct("anchor_ratios")),
+                       #TODO not always true original K=S*R already corrected
+                       1,   #TODO: add it to config.ini following detectron2
+                       rpn_config.getint("hidden_channels"),
+                       norm_act_dynamic)
+
 
     # Create instance segmentation network
+
+    # init BbxPredictionGenerator
     bbx_prediction_generator = BbxPredictionGenerator(roi_config.getfloat("nms_threshold"),
                                                       roi_config.getfloat("score_threshold"),
                                                       roi_config.getint("max_predictions"))
+
+    # init MskPredictionGenerator
     msk_prediction_generator = MskPredictionGenerator()
+
     roi_size = roi_config.getstruct("roi_size")
+
+    # init ProposalMatcher
     proposal_matcher = ProposalMatcher(classes,
                                        roi_config.getint("num_samples"),
                                        roi_config.getfloat("pos_ratio"),
@@ -169,18 +221,34 @@ def make_model(config, num_thing, num_stuff):
                                        roi_config.getfloat("neg_threshold_hi"),
                                        roi_config.getfloat("neg_threshold_lo"),
                                        roi_config.getfloat("void_threshold"))
+    # init DetectionLoss
     bbx_loss = DetectionLoss(roi_config.getfloat("sigma"))
+
     msk_loss = InstanceSegLoss()
+
     lbl_roi_size = tuple(s * 2 for s in roi_size)
-    roi_algo = InstanceSegAlgoFPN(
-        bbx_prediction_generator, msk_prediction_generator, proposal_matcher, bbx_loss, msk_loss, classes,
-        roi_config.getstruct("bbx_reg_weights"), roi_config.getint("fpn_canonical_scale"),
-        roi_config.getint("fpn_canonical_level"), roi_size, roi_config.getint("fpn_min_level"),
-        roi_config.getint("fpn_levels"), lbl_roi_size, roi_config.getboolean("void_is_background"))
+
+    roi_algo = InstanceSegAlgoFPN(bbx_prediction_generator,
+                                  msk_prediction_generator,
+                                  proposal_matcher,
+                                  bbx_loss,
+                                  msk_loss,
+                                  classes,
+
+                                  roi_config.getstruct("bbx_reg_weights"),  #bbx_reg_weights = (10., 10., 5., 5.)
+                                  roi_config.getint("fpn_canonical_scale"),
+                                  roi_config.getint("fpn_canonical_level"),
+                                  roi_size,
+                                  roi_config.getint("fpn_min_level"),
+                                  roi_config.getint("fpn_levels"),
+                                  lbl_roi_size,
+                                  roi_config.getboolean("void_is_background"))
+
     roi_head = FPNMaskHead(fpn_config.getint("out_channels"), classes, roi_size, norm_act=norm_act_dynamic)
 
     # Create final network
-    return InstanceSegNet(body, rpn_head, roi_head, rpn_algo, roi_algo, classes)
+    out = InstanceSegNet(body, rpn_head, roi_head, rpn_algo, roi_algo, classes)
+    return out
 
 
 def make_optimizer(config, model, epoch_length):
@@ -251,6 +319,7 @@ def train(model, optimizer, scheduler, dataloader, meters, **varargs):
 
         # Run network
         losses, _ = model(**batch, do_loss=True, do_prediction=False)
+
         distributed.barrier()
 
         losses = OrderedDict((k, v.mean()) for k, v in losses.items())
@@ -407,28 +476,39 @@ def main(args):
     train_dataloader, val_dataloader = make_dataloader(args, config, rank, world_size)
 
     # Create model
-    model = make_model(config, train_dataloader.dataset.num_thing, train_dataloader.dataset.num_stuff)
-    if args.resume:
-        assert not args.pre_train, "resume and pre_train are mutually exclusive"
-        log_debug("Loading snapshot from %s", args.resume)
-        snapshot = resume_from_snapshot(model, args.resume, ["body", "rpn_head", "roi_head"])
-    elif args.pre_train:
+    model = make_model(config,
+                       train_dataloader.dataset.num_thing,
+                       train_dataloader.dataset.num_stuff)
+
+    #if args.resume:
+    #    assert not args.pre_train, "resume and pre_train are mutually exclusive"
+    #    log_debug("Loading snapshot from %s", args.resume)
+    #    snapshot = resume_from_snapshot(model,
+    #                                   args.resume,
+    #                                  ["body", "rpn_head", "roi_head"])
+    if args.pre_train:
         assert not args.resume, "resume and pre_train are mutually exclusive"
         log_debug("Loading pre-trained model from %s", args.pre_train)
-        pre_train_from_snapshots(model, args.pre_train, ["body", "rpn_head", "roi_head"])
+        pre_train_from_snapshots(model,
+                                 args.pre_train,
+                                 ["body", "rpn_head", "roi_head"])
     else:
         assert not args.eval, "--resume is needed in eval mode"
         snapshot = None
 
     # Init GPU stuff
     torch.backends.cudnn.benchmark = config["general"].getboolean("cudnn_benchmark")
-    model = DistributedDataParallel(model.cuda(device), device_ids=[device_id], output_device=device_id,
+    model = DistributedDataParallel(model.cuda(device),
+                                    device_ids=[device_id],
+                                    output_device=device_id,
                                     find_unused_parameters=True)
 
     # Create optimizer
-    optimizer, scheduler, batch_update, total_epochs = make_optimizer(config, model, len(train_dataloader))
-    if args.resume:
-        optimizer.load_state_dict(snapshot["state_dict"]["optimizer"])
+    optimizer, scheduler, batch_update, total_epochs = make_optimizer(config,
+                                                                      model,
+                                                                      len(train_dataloader))
+    #if args.resume:
+    #    optimizer.load_state_dict(snapshot["state_dict"]["optimizer"])
 
     # Training loop
     momentum = 1. - 1. / len(train_dataloader)
@@ -441,26 +521,32 @@ def main(args):
         "roi_msk_loss": AverageMeter((), momentum)
     }
 
-    if args.resume:
-        starting_epoch = snapshot["training_meta"]["epoch"] + 1
-        best_score = snapshot["training_meta"]["best_score"]
-        global_step = snapshot["training_meta"]["global_step"]
-        for name, meter in meters.items():
-            meter.load_state_dict(snapshot["state_dict"][name + "_meter"])
-        del snapshot
-    else:
-        starting_epoch = 0
-        best_score = 0
-        global_step = 0
+    #if args.resume:
+    #    starting_epoch = snapshot["training_meta"]["epoch"] + 1
+    #    best_score = snapshot["training_meta"]["best_score"]
+    #    global_step = snapshot["training_meta"]["global_step"]
+    #    for name, meter in meters.items():
+    #        meter.load_state_dict(snapshot["state_dict"][name + "_meter"])
+    #    del snapshot
+    #else:
+    starting_epoch = 0
+    best_score = 0
+    global_step = 0
 
     # Optional: evaluation only:
     if args.eval:
         log_info("Validating epoch %d", starting_epoch - 1)
-        validate(model, val_dataloader, config["optimizer"].getstruct("loss_weights"),
-                 device=device, summary=summary, global_step=global_step,
-                 epoch=starting_epoch - 1, num_epochs=total_epochs,
+        validate(model,
+                 val_dataloader,
+                 config["optimizer"].getstruct("loss_weights"),
+                 device=device,
+                 summary=summary,
+                 global_step=global_step,
+                 epoch=starting_epoch - 1,
+                 num_epochs=total_epochs,
                  log_interval=config["general"].getint("log_interval"),
-                 coco_gt=config["dataloader"]["coco_gt"], log_dir=args.log_dir)
+                 coco_gt=config["dataloader"]["coco_gt"],
+                 log_dir=args.log_dir)
         exit(0)
 
     for epoch in range(starting_epoch, total_epochs):
@@ -469,10 +555,19 @@ def main(args):
             scheduler.step(epoch)
 
         # Run training epoch
-        global_step = train(model, optimizer, scheduler, train_dataloader, meters,
-                            batch_update=batch_update, epoch=epoch, summary=summary, device=device,
-                            log_interval=config["general"].getint("log_interval"), num_epochs=total_epochs,
-                            global_step=global_step, loss_weights=config["optimizer"].getstruct("loss_weights"))
+        global_step = train(model,
+                            optimizer,
+                            scheduler,
+                            train_dataloader,
+                            meters,
+                            batch_update=batch_update,
+                            epoch=epoch,
+                            summary=summary,
+                            device=device,
+                            log_interval=config["general"].getint("log_interval"),
+                            num_epochs=total_epochs,
+                            global_step=global_step,
+                            loss_weights=config["optimizer"].getstruct("loss_weights"))
 
         # Save snapshot (only on rank 0)
         if rank == 0:

@@ -95,9 +95,11 @@ class PanopticNet(nn.Module):
         # Segmentation part
         if do_loss:
             sem_loss, conf_mat, sem_pred = self.semantic_seg_algo.training(self.sem_head, x, sem, valid_size, img_size)
+
         elif do_prediction:
             sem_pred = self.semantic_seg_algo.inference(self.sem_head, x, valid_size, img_size)
             sem_loss, conf_mat = None, None
+
         else:
             sem_loss, conf_mat, sem_pred = None, None, None
 

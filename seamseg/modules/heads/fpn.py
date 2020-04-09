@@ -112,6 +112,10 @@ class FPNMaskHead(nn.Module):
         self.roi_cls = nn.Linear(fc_hidden_channels, classes["thing"] + 1)
         self.roi_bbx = nn.Linear(fc_hidden_channels, classes["thing"] * 4)
 
+        # in_channels = 512
+        # conv_hidden_channels = 256
+        # roi_size = 14*14
+
         # Mask section
         self.conv = nn.Sequential(OrderedDict([
             ("conv1", nn.Conv2d(in_channels, conv_hidden_channels, 3, padding=1, bias=False)),
@@ -122,9 +126,18 @@ class FPNMaskHead(nn.Module):
             ("bn3", norm_act(conv_hidden_channels)),
             ("conv4", nn.Conv2d(conv_hidden_channels, conv_hidden_channels, 3, padding=1, bias=False)),
             ("bn4", norm_act(conv_hidden_channels)),
+        ]))
+
+        self.link = nn.Sequential(OrderedDict([
+            ("conv", nn.Conv2d(conv_hidden_channels, conv_hidden_channels, 1,  bias=False)),
+            ("bn", norm_act(conv_hidden_channels)),
+        ]))
+
+        self.up = nn.Sequential(OrderedDict([
             ("conv_up", nn.ConvTranspose2d(conv_hidden_channels, conv_hidden_channels, 2, stride=2, bias=False)),
             ("bn_up", norm_act(conv_hidden_channels))
         ]))
+
         self.roi_msk = nn.Conv2d(conv_hidden_channels, classes["thing"], 1)
 
         self.reset_parameters()
@@ -146,7 +159,7 @@ class FPNMaskHead(nn.Module):
             if hasattr(mod, "bias") and mod.bias is not None:
                 nn.init.constant_(mod.bias, 0.)
 
-    def forward(self, x, do_cls_bbx=True, do_msk=True):
+    def forward(self, x, y=None,  do_cls_bbx=True, do_msk=True):
         """ROI head module for FPN
 
         Parameters
@@ -167,6 +180,7 @@ class FPNMaskHead(nn.Module):
         msk_logits : torch.Tensor
             A tensor of class-specific mask logits with shape S x num_thing x (H_roi * 2) x (W_roi * 2)
         """
+
         # Run fully-connected head
         if do_cls_bbx:
             x_fc = functional.avg_pool2d(x, 2)
@@ -180,13 +194,19 @@ class FPNMaskHead(nn.Module):
 
         # Run convolutional head
         if do_msk:
-            x = self.conv(x)
+
+            if y is not None:
+                x = x + self.link(y)
+
+            y = self.conv(x)
+            x = self.up(x)
+
             msk_logits = self.roi_msk(x)
         else:
             msk_logits = None
+            y = None
 
-        return cls_logits, bbx_logits, msk_logits
-
+        return cls_logits, bbx_logits, msk_logits, y
 
 class FPNSemanticHeadDeeplab(nn.Module):
     """Semantic segmentation head for FPN-style networks, extending Deeplab v3 for FPN bodies"""
@@ -219,14 +239,15 @@ class FPNSemanticHeadDeeplab(nn.Module):
             return pool
 
         def forward(self, x):
-            x = torch.cat([
-                self.conv1_3x3(x),
-                self.conv1_dil(x),
-                self.conv1_glb(self._global_pooling(x)),
-            ], dim=1)
+            x = torch.cat([self.conv1_3x3(x),
+                           self.conv1_dil(x),
+                           self.conv1_glb(self._global_pooling(x)),
+                           ], dim=1)
             x = self.bn1(x)
+
             x = self.conv2(x)
             x = self.bn2(x)
+
             return x
 
     def __init__(self,
@@ -239,13 +260,17 @@ class FPNSemanticHeadDeeplab(nn.Module):
                  pooling_size=(64, 64),
                  norm_act=ABN,
                  interpolation="bilinear"):
+
         super(FPNSemanticHeadDeeplab, self).__init__()
         self.min_level = min_level
         self.levels = levels
-        self.interpolation = interpolation
 
-        self.output = nn.ModuleList([
-            self._MiniDL(in_channels, hidden_channels, dilation, pooling_size, norm_act) for _ in range(levels)
+        self.interpolation = interpolation
+        self.output = nn.ModuleList([self._MiniDL(in_channels,
+                                                  hidden_channels,
+                                                  dilation,
+                                                  pooling_size,
+                                                  norm_act) for _ in range(levels)
         ])
         self.conv_sem = nn.Conv2d(hidden_channels * levels, num_classes, 1)
 

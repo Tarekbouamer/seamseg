@@ -41,6 +41,7 @@ class ResNet(nn.Module):
                  dilation=1,
                  dropout=None,
                  caffe_mode=False):
+
         super(ResNet, self).__init__()
         self.structure = structure
         self.bottleneck = bottleneck

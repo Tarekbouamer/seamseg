@@ -5,6 +5,9 @@ from seamseg.utils.parallel import PackedSequence
 
 def smooth_l1(x1, x2, sigma):
     """Smooth L1 loss"""
+    # Ref https://arxiv.org/pdf/1504.08083.pdf
+    # Sec 2.3
+    # Eq (2)
     sigma2 = sigma ** 2
 
     diff = x1 - x2

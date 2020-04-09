@@ -86,6 +86,8 @@ def roi_sampling(x, bbx, idx, roi_size, interpolation="bilinear", padding="borde
         Optional output returned only when valid_mask is `True`: a mask tensor with shape K x h_roi x w_roi, whose
         entries are `!= 0` where the corresponding location in `y` was sampled from within the limits of the input image
     """
+
+
     return ROISampling.apply(x, bbx, idx, roi_size, interpolation, padding, valid_mask)
 
 

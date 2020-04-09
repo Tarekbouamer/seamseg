@@ -11,10 +11,14 @@ at::Tensor nms(const at::Tensor& bbx, const at::Tensor& scores, float threshold,
   AT_CHECK(bbx.is_contiguous(), "bbx must be a contiguous tensor");
 
   at::Tensor comp_mat;
-  if (bbx.is_cuda()) {
+  if (bbx.is_cuda()) 
+  {
+    
     comp_mat = comp_mat_cuda(bbx, threshold);
     comp_mat = comp_mat.toBackend(at::Backend::CPU);
-  } else {
+  } 
+  else 
+  {
     comp_mat = comp_mat_cpu(bbx, threshold);
   }
 

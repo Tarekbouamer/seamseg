@@ -27,12 +27,8 @@ class FPN(nn.Module):
         self.interpolation = interpolation
 
         # Lateral connections and output convolutions
-        self.lateral = nn.ModuleList([
-            self._make_lateral(channels, out_channels, norm_act) for channels in in_channels
-        ])
-        self.output = nn.ModuleList([
-            self._make_output(out_channels, norm_act) for _ in in_channels
-        ])
+        self.lateral = nn.ModuleList([self._make_lateral(channels, out_channels, norm_act) for channels in in_channels])
+        self.output = nn.ModuleList([self._make_output(out_channels, norm_act) for _ in in_channels])
 
         if extra_scales > 0:
             self.extra = nn.ModuleList([
@@ -54,17 +50,22 @@ class FPN(nn.Module):
 
     @staticmethod
     def _make_lateral(input_channels, hidden_channels, norm_act):
-        return nn.Sequential(OrderedDict([
-            ("conv", nn.Conv2d(input_channels, hidden_channels, 1, bias=False)),
-            ("bn", norm_act(hidden_channels))
-        ]))
+        return nn.Sequential(OrderedDict([("conv", nn.Conv2d(input_channels,
+                                                             hidden_channels,
+                                                             1,
+                                                             bias=False)),
+                                          ("bn", norm_act(hidden_channels))
+                                          ]))
 
     @staticmethod
     def _make_output(channels, norm_act):
-        return nn.Sequential(OrderedDict([
-            ("conv", nn.Conv2d(channels, channels, 3, padding=1, bias=False)),
-            ("bn", norm_act(channels))
-        ]))
+        return nn.Sequential(OrderedDict([("conv", nn.Conv2d(channels,
+                                                             channels,
+                                                             3,
+                                                             padding=1,
+                                                             bias=False)),
+                                          ("bn", norm_act(channels))
+                                          ]))
 
     @staticmethod
     def _make_extra(input_channels, out_channels, norm_act):

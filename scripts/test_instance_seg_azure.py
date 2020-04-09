@@ -3,6 +3,7 @@ import time
 from collections import OrderedDict
 from functools import partial
 from os import path, mkdir
+from glob import glob
 
 import torch
 import torch.utils.data as data
@@ -44,8 +45,8 @@ parser.add_argument("--raw", action="store_true", help="Save raw predictions ins
 parser.add_argument("--person", type=str, default='', help="Detect specific class")
 parser.add_argument("config", metavar="FILE", type=str, help="Path to configuration file")
 parser.add_argument("model", metavar="FILE", type=str, help="Path to model file")
-parser.add_argument("data", metavar="DIR", type=str, help="Path to dataset")
-parser.add_argument("out_dir", metavar="DIR", type=str, help="Path to output directory")
+parser.add_argument("experiment", metavar="DIR", type=str, help="Path to dataset")
+#parser.add_argument("out_dir", metavar="DIR", type=str, help="Path to output directory")
 
 
 def log_debug(msg, *args, **kwargs):
@@ -259,6 +260,7 @@ def save_prediction_image(raw_pred, img_info, out_dir, colors, num_stuff, thresh
         color = colors[cls_pred_i.item() + num_stuff]
 
         if obj_pred_i.item() > threshold:
+            ''''
             if not obj_cls:
                 # detect ALL
                 msk = Image.fromarray(msk_pred_i.numpy() * 192)
@@ -270,7 +272,7 @@ def save_prediction_image(raw_pred, img_info, out_dir, colors, num_stuff, thresh
                     bbx_pred_i[3].item(),
                     bbx_pred_i[2].item(),
                 ), outline=tuple(color), width=3)
-
+            '''
             if str(cls_pred_i.item()) == obj_cls:
                 # detect specific class
                 msk = Image.fromarray(msk_pred_i.numpy() * 192)
@@ -386,29 +388,41 @@ def main(args):
     # Load configuration
     config = make_config(args)
 
-    # Create dataloader
-    test_dataloader = make_dataloader(args, config, rank, world_size)
-    meta = load_meta(args.meta)
+    #get all experiments
 
-    # Create model
-    model = make_model(config, meta["num_thing"], meta["num_stuff"])
+    experiments = glob(path.join(args.experiment, '*/'))
+    print("processing", len(experiments), "experiments")
 
-    # Load snapshot
-    log_debug("Loading snapshot from %s", args.model)
-    resume_from_snapshot(model, args.model, ["body", "rpn_head", "roi_head"])
+    for exp in experiments:
+        args.data = path.join(exp, 'cam1/image/')
+        args.out_dir = path.join(exp, 'cam1/bbox_2d/')
 
-    # Init GPU stuff
-    torch.backends.cudnn.benchmark = config["general"].getboolean("cudnn_benchmark")
-    model = DistributedDataParallel(model.cuda(device), device_ids=[device_id], output_device=device_id)
+        if not args.out_dir:
+            mkdir(args.out_dir)
 
-    if args.raw:
-        save_function = partial(save_prediction_raw, out_dir=args.out_dir, threshold=args.threshold, obj_cls=args.person)
-    else:
-        save_function = partial(
-            save_prediction_image, out_dir=args.out_dir, colors=meta["palette"],
-            num_stuff=meta["num_stuff"], threshold=args.threshold, obj_cls=args.person)
-    test(model, test_dataloader, device=device, summary=None,
-         log_interval=config["general"].getint("log_interval"), save_function=save_function)
+        # Create dataloader
+        test_dataloader = make_dataloader(args, config, rank, world_size)
+        meta = load_meta(args.meta)
+
+        # Create model
+        model = make_model(config, meta["num_thing"], meta["num_stuff"])
+
+        # Load snapshot
+        log_debug("Loading snapshot from %s", args.model)
+        resume_from_snapshot(model, args.model, ["body", "rpn_head", "roi_head"])
+
+        # Init GPU stuff
+        torch.backends.cudnn.benchmark = config["general"].getboolean("cudnn_benchmark")
+        model = DistributedDataParallel(model.cuda(device), device_ids=[device_id], output_device=device_id)
+
+        if args.raw:
+            save_function = partial(save_prediction_raw, out_dir=args.out_dir, threshold=args.threshold, obj_cls=args.person)
+        else:
+            save_function = partial(
+                save_prediction_image, out_dir=args.out_dir, colors=meta["palette"],
+                num_stuff=meta["num_stuff"], threshold=args.threshold, obj_cls=args.person)
+        test(model, test_dataloader, device=device, summary=None,
+             log_interval=config["general"].getint("log_interval"), save_function=save_function)
 
 
 if __name__ == "__main__":

@@ -40,15 +40,28 @@ class SemanticSegLoss:
             A scalar tensor with the computed loss
         """
         sem_loss = []
+
         for sem_logits_i, sem_i in zip(sem_logits, sem):
-            sem_loss_i = functional.cross_entropy(
-                sem_logits_i.unsqueeze(0), sem_i.unsqueeze(0), ignore_index=self.ignore_index, reduction="none")
+
+            # sem_logits_i N * 19 * H * W
+            # sem_i N * H * W
+
+            sem_loss_i = functional.cross_entropy(sem_logits_i.unsqueeze(0),
+                                                  sem_i.unsqueeze(0),
+                                                  ignore_index=self.ignore_index,
+                                                  reduction="none")
+
             sem_loss_i = sem_loss_i.view(-1)
 
+            # hard mining with worst pixel losses 25 % for example
             if self.ohem is not None and self.ohem != 1:
                 top_k = int(ceil(sem_loss_i.numel() * self.ohem))
+                print('sem_loss_i', sem_loss_i.shape)
+                print('top_k', top_k)
                 if top_k != sem_loss_i.numel():
                     sem_loss_i, _ = sem_loss_i.topk(top_k)
+                print('sem_loss_i', sem_loss_i.shape)
+                input()
 
             sem_loss.append(sem_loss_i.mean())
 

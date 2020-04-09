@@ -80,8 +80,10 @@ class InstanceSegLoss:
             msk_lbl = (msk_lbl == 1).to(msk_logits.dtype)
 
             idx = torch.arange(0, msk_logits.size(0), dtype=torch.long, device=msk_logits.device)
-            msk_loss = functional.binary_cross_entropy_with_logits(
-                msk_logits[idx, cls_lbl - 1], msk_lbl, weight=weights, reduction="sum")
+            msk_loss = functional.binary_cross_entropy_with_logits(msk_logits[idx, cls_lbl - 1],
+                                                                   msk_lbl,
+                                                                   weight=weights,
+                                                                   reduction="sum")
             msk_loss = msk_loss / weights.sum()
         else:
             msk_loss = msk_logits.sum() * 0
@@ -136,8 +138,7 @@ class InstanceSegAlgo:
         cls_lbl = []
         bbx_lbl = []
         msk_lbl = []
-        for i, (proposals_i, bbx_i, cat_i, ids_i, msk_i, match_i) in enumerate(zip(
-                proposals, bbx, cat, ids, msk, match)):
+        for i, (proposals_i, bbx_i, cat_i, ids_i, msk_i, match_i) in enumerate(zip(proposals, bbx, cat, ids, msk, match)):
             if match_i is not None:
                 pos = match_i >= 0
 
@@ -151,10 +152,13 @@ class InstanceSegAlgo:
                     bbx_lbl_i *= bbx_lbl_i.new(self.bbx_reg_weights)
 
                     iis_lbl_i = ids_i[match_i[pos]]
+
                     # Compute instance segmentation masks
-                    msk_i = roi_sampling(
-                        msk_i.unsqueeze(0), proposals_i[pos], msk_i.new_zeros(pos.long().sum().item()),
-                        self.lbl_roi_size, interpolation="nearest")
+                    msk_i = roi_sampling(msk_i.unsqueeze(0),
+                                         proposals_i[pos],
+                                         msk_i.new_zeros(pos.long().sum().item()),
+                                         self.lbl_roi_size, #28*28
+                                         interpolation="nearest")
 
                     # Calculate mask segmentation labels
                     msk_lbl_i = (msk_i == iis_lbl_i.view(-1, 1, 1, 1)).any(dim=1).to(torch.long)
